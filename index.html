@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>完整版僵尸防御</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { background: #2c3e50; }
+        #hud {
+            position: fixed;
+            top: 0;
+            padding: 10px;
+            width: 100%;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            font-family: Arial;
+            display: flex;
+            justify-content: space-between;
+        }
+        #expBar {
+            position: fixed;
+            top: 35px;
+            height: 3px;
+            background: #555;
+            width: 100%;
+        }
+        #expProgress { height: 100%; background: #2ecc71; transition: width 0.3s; }
+        #upgradePanel {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            padding: 20px;
+            border-radius: 10px;
+            display: none;
+        }
+        .upgradeOption {
+            padding: 15px;
+            margin: 10px;
+            background: #3498db;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .healthBar {
+            position: absolute;
+            width: 40px;
+            height: 3px;
+            background: #ff0000;
+            top: -5px;
+            left: 0;
+        }
+        .healthProgress {
+            height: 100%;
+            background: #00ff00;
+        }
+        #laserCD {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 200px;
+            height: 5px;
+            background: #555;
+        }
+        #laserProgress {
+            height: 100%;
+            background: #e74c3c;
+            transition: width 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <div id="hud">
+        <div>等級: <span id="level">1</span></div>
+        <div>生命: <span id="health">100</span></div>
+        <div>經驗: <span id="exp">0/50</span></div>
+    </div>
+    <div id="expBar"><div id="expProgress" style="width: 0%"></div></div>
+    <div id="laserCD"><div id="laserProgress" style="width: 0%"></div></div>
+    <div id="upgradePanel">
+        <div class="upgradeOption" id="option1"></div>
+        <div class="upgradeOption" id="option2"></div>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+const enemyTypes = [
+    {type: 'small',  hp: 1, speed: 4.5, size: 30, color: '#2ecc71'},
+    {type: 'normal', hp: 2, speed: 3.5, size: 40, color: '#27ae60'},
+    {type: 'armored',hp: 3, speed: 2.5, size: 50, color: '#f1c40f'},
+    {type: 'giant',  hp: 5, speed: 1.5, size: 70, color: '#e74c3c'},
+    {type: 'boss',   hp: 8, speed: 0.8, size: 90, color: '#9b59b6'}
+];
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let w = window.innerWidth, h = window.innerHeight;
+canvas.width = w; canvas.height = h;
+
+let gameState = {
+    player: {x: w/2-20, y: h-60, w: 40, h: 60},
+    bullets: [], 
+    zombies: [],
+    vehicles: [],
+    lasers: [],
+    health: 100, 
+    exp: 0, 
+    level: 1, 
+    nextLevelExp: 50,
+    fireDelay: 500, 
+    lastFire: 0, 
+    barrelCount: 1, 
+    burstCount: 1,
+    upgradesChosen: 0,
+    isPaused: false,
+    
+    // 激光系统
+    laser: {
+        active: false,
+        duration: 2000,
+        cooldown: 5000,
+        lastUsed: 0,
+        level: { duration: 0, cooldown: 0 }
+    },
+    
+    // 装甲车系统
+    vehicle: {
+        active: false,
+        spawnInterval: 5000,
+        lastSpawn: 0
+    }
+};
+
+function resize() {
+    w = window.innerWidth; 
+    h = window.innerHeight;
+    canvas.width = w; 
+    canvas.height = h;
+    gameState.player.x = w/2 - 20;
+}
+window.addEventListener('resize', resize);
+
+// 武器系统核心逻辑
+function handleWeapons(timestamp) {
+    // 激光系统
+    if(gameState.laser.active) {
+    const laser = gameState.laser;
+    const cdElapsed = timestamp - laser.lastUsed;
+    document.getElementById('laserProgress').style.width = 
+        `${Math.min(100, (cdElapsed / laser.cooldown) * 100)}%`;
+    
+    if(cdElapsed > laser.cooldown) {
+        const target = findNearestEnemy();
+        if(target) {
+            // 创建激光效果
+            const newLaser = {
+                startX: gameState.player.x + 20,
+                startY: gameState.player.y,
+                targetX: target.x + target.size/2,
+                targetY: target.y + target.size/2,
+                startTime: timestamp
+            };
+            
+            // 持续伤害
+            let interval = setInterval(() => {
+                gameState.zombies.forEach(z => {
+                    if(checkLaserCollision(z, newLaser)) {
+                        z.currentHP -= 0.5;
+                    }
+                });
+                
+                if(timestamp - newLaser.startTime > laser.duration) {
+                    clearInterval(interval);
+                    gameState.laser.lastUsed = timestamp;
+                    gameState.lasers = gameState.lasers.filter(l => l !== newLaser);
+                }
+            }, 50);
+            
+            gameState.lasers.push(newLaser);
+        }
+    }
+    }
+
+    // 装甲车系统
+    if(gameState.vehicle.active && timestamp - gameState.vehicle.lastSpawn > gameState.vehicle.spawnInterval) {
+    spawnVehicle();
+    gameState.vehicle.lastSpawn = timestamp;
+    }
+}
+
+function checkLaserCollision(zombie, laser) {
+    const dx = zombie.x - laser.startX;
+    const dy = zombie.y - laser.startY;
+    const angle = Math.atan2(laser.targetY - laser.startY, laser.targetX - laser.startX);
+    const projection = dx * Math.cos(angle) + dy * Math.sin(angle);
+    return projection >= 0 && projection <= Math.hypot(laser.targetX - laser.startX, laser.targetY - laser.startY);
+}
+
+function spawnVehicle() {
+    const vehicle = {
+        x: Math.random() * (w - 80),
+        y: h + 40,
+        width: 80,
+        height: 40,
+        speed: 8
+    };
+    gameState.vehicles.push(vehicle);
+}
+
+function updateVehicles() {
+    gameState.vehicles = gameState.vehicles.filter(vehicle => {
+        vehicle.y -= vehicle.speed;
+        
+        // 碾压检测
+        gameState.zombies.forEach(z => {
+            if(z.x > vehicle.x && z.x < vehicle.x + vehicle.width &&
+               z.y > vehicle.y && z.y < vehicle.y + vehicle.height) {
+                z.currentHP -= 5;
+            }
+        });
+        
+        return vehicle.y > -40;
+    });
+}
+
+// 升级系统
+function getUpgradeOptions() {
+    if(gameState.upgradesChosen < 2) {
+        return ['laser', 'vehicle'];
+    }
+    
+    const options = ['speed','barrel','burst'];
+    if(gameState.laser.active) {
+        options.push('激光持续时间+', '激光冷却-');
+    }
+    return options.sort(() => Math.random() - 0.5).slice(0,2);
+}
+
+function applyUpgrade(opt) {
+    switch(opt) {
+        case 'laser':
+            gameState.laser.active = true;
+            gameState.upgradesChosen++;
+            break;
+        case 'vehicle':
+            gameState.vehicle.active = true;
+            gameState.upgradesChosen++;
+            break;
+        case '激光持续时间+':
+            gameState.laser.duration += 500;
+            gameState.laser.level.duration++;
+            break;
+        case '激光冷却-':
+            gameState.laser.cooldown = Math.max(2000, gameState.laser.cooldown - 500);
+            gameState.laser.level.cooldown++;
+            break;
+        case 'speed':
+            gameState.fireDelay *= 0.85;
+            break;
+        case 'barrel':
+            gameState.barrelCount++;
+            break;
+        case 'burst':
+            gameState.burstCount++;
+            break;
+    }
+    
+    gameState.level++;
+    gameState.exp = 0;
+    gameState.nextLevelExp = Math.floor(gameState.nextLevelExp*1.5);
+    gameState.isPaused = false;
+    document.getElementById('level').textContent = gameState.level;
+    document.getElementById('upgradePanel').style.display = 'none';
+}
+
+// 游戏核心逻辑
+function gameLoop(timestamp) {
+    if(gameState.health <= 0) return;
+
+    if(!gameState.isPaused) {
+        // 武器系统更新
+        handleWeapons(timestamp);
+        updateVehicles();
+
+        // 自动射击
+        if(timestamp - gameState.lastFire > gameState.fireDelay) {
+            fire();
+            gameState.lastFire = timestamp;
+        }
+
+        // 敌人生成
+        if(Math.random() < 0.015) {
+            gameState.zombies.push(createEnemy());
+        }
+
+        // 移动和碰撞检测
+        gameState.zombies.forEach(z => z.y += z.speed);
+        gameState.zombies = gameState.zombies.filter(z => z.y < h + z.size);
+        processCollisions();
+    }
+
+    // 渲染
+    ctx.clearRect(0, 0, w, h);
+    
+    // 渲染敌人
+    gameState.zombies.forEach(z => {
+        ctx.fillStyle = z.color;
+        ctx.fillRect(z.x, z.y, z.size, z.size);
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(z.x, z.y-8, z.size, 3);
+        ctx.fillStyle = '#00ff00';
+        ctx.fillRect(z.x, z.y-8, z.size*(z.currentHP/z.maxHP), 3);
+    });
+
+    // 渲染激光
+    ctx.strokeStyle = 'rgba(255,0,0,0.5)';
+    ctx.lineWidth = 5;
+    gameState.lasers.forEach(laser => {
+        ctx.beginPath();
+        ctx.moveTo(laser.startX, laser.startY);
+        ctx.lineTo(laser.targetX, laser.targetY);
+        ctx.stroke();
+    });
+
+    // 渲染装甲车
+    ctx.fillStyle = '#34495e';
+    gameState.vehicles.forEach(v => {
+        ctx.fillRect(v.x, v.y, v.width, v.height);
+    });
+
+    // 渲染玩家
+    ctx.fillStyle = '#3498db';
+    ctx.fillRect(gameState.player.x, gameState.player.y, 40, 60);
+
+    requestAnimationFrame(gameLoop);
+}
+
+// 初始化函数
+function createEnemy() {
+    const type = enemyTypes[Math.floor(Math.random()*enemyTypes.length)];
+    return {
+        x: Math.random()*(w-type.size),
+        y: -type.size,
+        ...type,
+        maxHP: type.hp,
+        currentHP: type.hp
+    };
+}
+
+function fire() {
+    const target = gameState.zombies.reduce((closest, current) => {
+        const dist = Math.hypot(current.x-gameState.player.x, current.y-gameState.player.y);
+        return dist < (closest?.dist || Infinity) ? {current, dist} : closest;
+    }, null)?.current;
+
+    if(target) {
+        const baseAngle = Math.atan2(
+            target.y - gameState.player.y + target.speed*20,
+            target.x - gameState.player.x
+        );
+
+        for(let b=0; b<gameState.burstCount; b++) {
+            setTimeout(() => {
+                for(let i=0; i<gameState.barrelCount; i++) {
+                    const angle = baseAngle + (i - (gameState.barrelCount-1)/2)*0.2;
+                    gameState.bullets.push({
+                        x: gameState.player.x + 20,
+                        y: gameState.player.y,
+                        dx: Math.cos(angle)*9,
+                        dy: Math.sin(angle)*9
+                    });
+                }
+            }, b*80);
+        }
+    }
+}
+
+function processCollisions() {
+    gameState.bullets = gameState.bullets.filter(bullet => {
+        bullet.x += bullet.dx;
+        bullet.y += bullet.dy;
+
+        const hitIndex = gameState.zombies.findIndex(z => 
+            bullet.x > z.x && bullet.x < z.x+z.size &&
+            bullet.y > z.y && bullet.y < z.y+z.size
+        );
+
+        if(hitIndex > -1) {
+            const zombie = gameState.zombies[hitIndex];
+            zombie.currentHP--;
+            if(zombie.currentHP <= 0) {
+                gameState.zombies.splice(hitIndex, 1);
+                gameState.exp += zombie.maxHP*2;
+                updateExpDisplay();
+            }
+            return false;
+        }
+        return bullet.y > 0 && bullet.y < h;
+    });
+
+    if(gameState.zombies.some(z => z.y+z.size > gameState.player.y)) {
+        gameState.health -= 0.2;
+        document.getElementById('health').textContent = Math.floor(gameState.health);
+    }
+}
+
+function updateExpDisplay() {
+    document.getElementById('exp').textContent = `${gameState.exp}/${gameState.nextLevelExp}`;
+    document.getElementById('expProgress').style.width =
+        `${Math.min(100, gameState.exp/gameState.nextLevelExp*100)}%`;
+    if(gameState.exp >= gameState.nextLevelExp) {
+        gameState.isPaused = true;
+        showUpgradeOptions();
+    }
+}
+
+function showUpgradeOptions() {
+    const options = getUpgradeOptions();
+    document.getElementById('option1').textContent = getUpgradeDesc(options[0]);
+    document.getElementById('option2').textContent = getUpgradeDesc(options[1]);
+    document.getElementById('option1').onclick = () => applyUpgrade(options[0]);
+    document.getElementById('option2').onclick = () => applyUpgrade(options[1]);
+    document.getElementById('upgradePanel').style.display = 'block';
+}
+
+function getUpgradeDesc(opt) {
+    const descriptions = {
+        'laser': '解鎖激光武器',
+        'vehicle': '解鎖裝甲車支援',
+        'speed': `射速提升 ${Math.round(100 - gameState.fireDelay/5)}%`,
+        'barrel': `發射口數量 ${gameState.barrelCount} → ${gameState.barrelCount+1}`,
+        'burst': `連發次數 ${gameState.burstCount} → ${gameState.burstCount+1}`,
+        '激光持续时间+': `激光持續+0.5秒 (${gameState.laser.level.duration}級)`,
+        '激光冷却-': `激光冷卻-0.5秒 (${gameState.laser.level.cooldown}級)`
+    };
+    return descriptions[opt] || opt;
+}
+
+// 启动游戏
+gameLoop(0);
+</script>
+</body>
+</html>
